@@ -9,6 +9,7 @@ import time
 import sys
 import subprocess
 import telnetlib
+import concurrent.futures
 
 BASE_URL = "http://www.flvcd.com"
 QUALITY_DIC =  {"fluent":0, "normal":1, "high":2, "super":3, "super2":4, "super3":5, "real":6}
@@ -109,66 +110,81 @@ def get_parsed(vid_url):
                 order = int(line[11:])
     return download_list
 
+def part_download(fname, link, order, download_dir, chunk_size, text_size_threshold):
+    #get file extension from links
+    all_done = True
+    orig_fname = urlparse(link).path.split("/")[-1]
+    ext = orig_fname.split('.')[-1]
+    fpath = os.path.join(download_dir, "{}.{}".format(fname, ext))
+    print(fpath)
+    is_stream = False
+    while not is_stream:
+        data = requests.get(link, stream=True)
+        total_length = data.headers.get('content-length')
+        data_type = data.headers.get('content-type')
+        if data_type.lower() == "text/plain" and total_length and int(total_length) < text_size_threshold:
+            #doesn't seem to be a video stream, maybe a redirect link
+            #FIXME: dirty heuristic: find any quoted link 
+            #with our file extension in the text as destination
+            link = re.findall('(http://[^\'"]*?{}[^\'"]*)[\'"]'.format(ext), data.text)
+            assert len(link) == 1, "the file doesn't contain a single link"
+            link = link[0]
+        elif data_type.lower() == "application/octet-stream":
+            is_stream = True
+        else:
+            all_done = False
+            print("Unknown data type: {}, but still downloading.".format(data_type))
+            is_stream = True
+    #start downloading ...
+    downloaded_size = 0
+    if total_length is None:
+        total_length = "---"
 
-def download(download_list, download_dir="./", chunk_size=256*1024, text_size_threshold=1024*1024):
+    #skip downloaded parts
+    elif os.path.exists(fpath):
+        fsize = os.stat(fpath).st_size
+        if fsize >= int(total_length):
+            return fpath, all_done
+            
+
+    #download unfinished parts
+    with open(fpath, 'wb') as f:
+        print("downloading {}".format(fpath))
+        print(link)
+        timestamp = time.perf_counter()
+        for chunk in data.iter_content(chunk_size):
+            f.write(chunk)
+            downloaded_size += len(chunk)
+            kbps = len(chunk) / (time.perf_counter() - timestamp) / 1024
+            timestamp = time.perf_counter()
+            sys.stdout.write("\r{}: {} of {} @ {:.1f}KB/s     ".format(\
+                    order, downloaded_size, total_length, kbps))
+        print()
+
+    fsize = os.stat(fpath).st_size
+    if fsize < int(total_length) or data.status_code != 200:
+        print(data.status_code)
+        print()
+        all_done = False
+    return fpath, all_done
+
+def download(download_list, max_workers=20, download_dir="./", chunk_size=256*1024, text_size_threshold=1024*1024):
     saved_list = [None] * len(download_list)
     all_done = True
-    for fname, link, order in download_list:
-        #get file extension from links
-        orig_fname = urlparse(link).path.split("/")[-1]
-        ext = orig_fname.split('.')[-1]
-        fpath = os.path.join(download_dir, "{}.{}".format(fname, ext))
-        print(fpath)
-        is_stream = False
-        while not is_stream:
-            data = requests.get(link, stream=True)
-            total_length = data.headers.get('content-length')
-            data_type = data.headers.get('content-type')
-            if data_type.lower() == "text/plain" and total_length and int(total_length) < text_size_threshold:
-                #doesn't seem to be a video stream, maybe a redirect link
-                #FIXME: dirty heuristic: find any quoted link 
-                #with our file extension in the text as destination
-                link = re.findall('(http://[^\'"]*?{}[^\'"]*)[\'"]'.format(ext), data.text)
-                assert len(link) == 1, "the file doesn't contain a single link"
-                link = link[0]
-            elif data_type.lower() == "application/octet-stream":
-                is_stream = True
-            else:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_order = {}
+        for fname, link, order in download_list:
+            future_to_order[executor.submit(part_download, fname, link, order, download_dir, chunk_size, text_size_threshold)] = order
+        for future in concurrent.futures.as_completed(future_to_url):
+            order = future_to_order[future]
+            try:
+                fpath, part_all_done = future.result()
+            except Exception as exc:
+                print('number {} generated an exception: {}'.format(order, exc))
                 all_done = False
-                print("Unknown data type: {}, but still downloading.".format(data_type))
-                is_stream = True
-        #start downloading ...
-        downloaded_size = 0
-        if total_length is None:
-            total_length = "---"
-
-        #skip downloaded parts
-        elif os.path.exists(fpath):
-            fsize = os.stat(fpath).st_size
-            if fsize >= int(total_length):
+            else:
+                all_done &= part_all_done
                 saved_list[order-1] = fpath
-                continue
-
-        #download unfinished parts
-        with open(fpath, 'wb') as f:
-            print("downloading {}".format(fpath))
-            print(link)
-            timestamp = time.perf_counter()
-            for chunk in data.iter_content(chunk_size):
-                f.write(chunk)
-                downloaded_size += len(chunk)
-                kbps = len(chunk) / (time.perf_counter() - timestamp) / 1024
-                timestamp = time.perf_counter()
-                sys.stdout.write("\r{} of {} @ {:.1f}KB/s".format(\
-                        downloaded_size, total_length, kbps))
-            print()
-        saved_list[order-1] = fpath
-
-        fsize = os.stat(fpath).st_size
-        if fsize < int(total_length) or data.status_code != 200:
-            print(data.status_code)
-            print()
-            all_done = False
 
     return saved_list, all_done
 
