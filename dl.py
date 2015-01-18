@@ -168,7 +168,7 @@ def part_download(fname, link, order, download_dir, chunk_size, text_size_thresh
         all_done = False
     return fpath, all_done
 
-def download(download_list, max_workers=20, download_dir="./", chunk_size=256*1024, text_size_threshold=1024*1024):
+def download(download_list, max_workers=10, download_dir="./", chunk_size=256*1024, text_size_threshold=1024*1024):
     saved_list = [None] * len(download_list)
     all_done = True
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
