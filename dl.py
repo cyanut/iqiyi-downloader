@@ -175,7 +175,7 @@ def download(download_list, max_workers=20, download_dir="./", chunk_size=256*10
         future_to_order = {}
         for fname, link, order in download_list:
             future_to_order[executor.submit(part_download, fname, link, order, download_dir, chunk_size, text_size_threshold)] = order
-        for future in concurrent.futures.as_completed(future_to_url):
+        for future in concurrent.futures.as_completed(future_to_order):
             order = future_to_order[future]
             try:
                 fpath, part_all_done = future.result()
